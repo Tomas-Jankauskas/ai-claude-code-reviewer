@@ -333,7 +333,38 @@ def parse_diff(diff_str: str) -> List[Dict[str, Any]]:
 
     return files
 
+def get_review_prompt(code: str) -> str:
+    return """Review this code and provide specific suggestions for improvement. 
+    For each suggestion, include:
+    1. A clear code example showing the recommended change
+    2. A brief explanation of why the change improves the code
+    
+    Example format:
 
+    Suggestion 1: [Brief description]
+    ```python
+    # Current code
+    def process_data(data):
+        return data.process()
+    
+    # Improved code with error handling
+    def process_data(data):
+        try:
+            return data.process()
+        except ProcessingError as e:
+            logger.error(f"Failed to process data: {e}")
+            raise
+    ```
+    This adds proper error handling to make the code more robust.
+    
+    Please provide at least 2-3 concrete code examples in your review."""
+
+def validate_review(review: str) -> bool:
+    # Check for presence of code examples
+    if review.count("```") < 2:  # At least one code block
+        return False, "Review must include code examples with suggested improvements"
+    
+    return True, "Review format is valid"
 
 def main():
     """Main function to execute the code review process."""
