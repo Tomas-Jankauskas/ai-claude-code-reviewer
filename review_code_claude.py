@@ -513,7 +513,7 @@ def post_comments_to_pr(
     pull_number: int,
     comments: List[Dict[str, Any]],
 ):
-    """Posts comments to the PR as a single issue comment."""
+    """Posts comments to the PR as individual line comments."""
     print(f"Posting {len(comments)} review comments to PR")
     
     if not comments:
@@ -527,50 +527,103 @@ def post_comments_to_pr(
         pr = repo_obj.get_pull(pull_number)
         debug_log(f"Successfully retrieved PR: {pr.title}")
         
-        # Format all reviews into a single comment
-        comment_body = "# Claude Code Review Results\n\n"
+        # Get the list of files in the PR to verify paths
+        pr_files = list(pr.get_files())
+        file_paths = [f.filename for f in pr_files]
+        debug_log(f"PR contains {len(file_paths)} files: {file_paths}")
         
-        # Group comments by file for better organization
-        comments_by_file = {}
-        for comment in comments:
-            file_path = comment['path']
-            if file_path not in comments_by_file:
-                comments_by_file[file_path] = []
-            comments_by_file[file_path].append(comment)
+        # Track how many comments were successfully created
+        successful_comments = 0
+        failed_comments = 0
+        comment_ids = []
         
-        # Add file headings and organize comments by file
-        for file_path, file_comments in comments_by_file.items():
-            comment_body += f"## File: {file_path}\n\n"
+        # Process each comment
+        print(f"Creating individual line comments for each issue...")
+        for i, comment in enumerate(comments):
+            try:
+                path = comment.get('path')
+                line = comment.get('line')
+                body = comment.get('body')
+                
+                # Skip invalid comments
+                if not path or not line or not body:
+                    debug_log(f"Skipping comment with missing data: path={path}, line={line}")
+                    failed_comments += 1
+                    continue
+                
+                # Verify the file path exists in the PR
+                if path not in file_paths:
+                    debug_log(f"Warning: File path '{path}' not found in PR files")
+                    # Try to find a close match
+                    for pr_file in file_paths:
+                        if pr_file.endswith(path):
+                            debug_log(f"Found matching file: {pr_file}")
+                            path = pr_file
+                            break
+                
+                debug_log(f"Creating comment on {path}:{line}")
+                
+                # Create comment directly on the PR
+                pr_comment = pr.create_comment(
+                    body=body,
+                    path=path,
+                    line=line
+                )
+                
+                debug_log(f"Successfully created comment {i+1}/{len(comments)} with ID: {pr_comment.id}")
+                comment_ids.append(pr_comment.id)
+                successful_comments += 1
+                
+            except Exception as e:
+                debug_log(f"Error creating comment {i+1}/{len(comments)}: {str(e)}")
+                failed_comments += 1
+                continue
+        
+        # Print summary
+        print(f"Created {successful_comments} comments successfully, {failed_comments} failed")
+        
+        if successful_comments > 0:
+            return comment_ids
+        else:
+            raise Exception("Failed to create any comments")
             
-            # Sort comments by line number
-            file_comments.sort(key=lambda c: c.get('line', 0))
-            
-            for comment in file_comments:
-                line_num = comment.get('line', 'N/A')
-                comment_body += f"### Line {line_num}\n\n"
-                comment_body += f"{comment['body']}\n\n"
-                comment_body += "---\n\n"
-        
-        # Create the comment
-        issue_comment = pr.create_issue_comment(comment_body)
-        print(f"Successfully created consolidated issue comment with ID: {issue_comment.id}")
-        debug_log("Successfully posted review as a single issue comment")
-        return issue_comment.id
-        
     except Exception as e:
-        print(f"ERROR: Failed to post review comment: {str(e)}")
+        print(f"ERROR: Failed to create comments: {str(e)}")
         print(f"Error type: {type(e)}")
         
-        # Try fallback method - create a simple comment
+        # Try fallback method - create a consolidated issue comment
         try:
-            debug_log("Using fallback method: Creating a simple issue comment")
-            fallback_comment = pr.create_issue_comment(
-                "Claude found issues in the code but could not post detailed comments. " +
-                "Please check the action logs for details."
-            )
-            print(f"Created fallback comment with ID: {fallback_comment.id}")
-            # Still raise an exception to mark the action as failed
-            raise Exception(f"Could not create detailed comments: {str(e)}")
+            debug_log("Using fallback method: Creating a consolidated issue comment")
+            
+            # Format all reviews into a single comment
+            comment_body = "# Claude Code Review Results\n\n"
+            
+            # Group comments by file for better organization
+            comments_by_file = {}
+            for comment in comments:
+                file_path = comment.get('path', 'Unknown')
+                if file_path not in comments_by_file:
+                    comments_by_file[file_path] = []
+                comments_by_file[file_path].append(comment)
+            
+            # Add file headings and organize comments by file
+            for file_path, file_comments in comments_by_file.items():
+                comment_body += f"## File: {file_path}\n\n"
+                
+                # Sort comments by line number
+                file_comments.sort(key=lambda c: c.get('line', 0))
+                
+                for comment in file_comments:
+                    line_num = comment.get('line', 'N/A')
+                    comment_body += f"### Line {line_num}\n\n"
+                    comment_body += f"{comment.get('body', '')}\n\n"
+                    comment_body += "---\n\n"
+            
+            # Create the fallback comment
+            fallback_comment = pr.create_issue_comment(comment_body)
+            print(f"Created fallback consolidated comment with ID: {fallback_comment.id}")
+            return [fallback_comment.id]  # Return as a list for consistency
+            
         except Exception as e2:
             debug_log(f"Fallback method failed: {str(e2)}")
             # Re-raise the original exception
