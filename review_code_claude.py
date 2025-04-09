@@ -10,6 +10,7 @@ import fnmatch
 import re
 from unidiff import Hunk, PatchedFile, PatchSet
 from embeddings_store import GuidelinesStore
+from guidelines_manager import GuidelinesManager
 # from dotenv import load_dotenv // for local env only
 
 # Load environment variables from .env file
@@ -17,6 +18,9 @@ from embeddings_store import GuidelinesStore
 
 # Set DEBUG to true to get more verbose logging
 DEBUG = os.environ.get('DEBUG', 'true').lower() == 'true'
+
+# Initialize global guidelines store
+guidelines_store = None
 
 def debug_log(message):
     if DEBUG:
@@ -54,16 +58,6 @@ try:
     debug_log("Anthropic client initialized successfully")
 except Exception as e:
     print(f"ERROR: Failed to initialize Anthropic client: {str(e)}")
-    sys.exit(1)
-
-# Initialize guidelines store
-try:
-    debug_log("Initializing guidelines store...")
-    guidelines_store = GuidelinesStore()
-    guidelines_store.initialize_from_markdown('coding_guidelines.md')
-    debug_log("Guidelines store initialized successfully")
-except Exception as e:
-    print(f"ERROR: Failed to initialize guidelines store: {str(e)}")
     sys.exit(1)
 
 class PRDetails:
@@ -368,15 +362,19 @@ def create_prompt(file: File, chunk: Chunk, pr_details: PRDetails) -> str:
         # Normalize file path for consistent handling
         normalized_path = normalize_file_path(file.to_file)
         
-        # Get relevant guidelines based on the code being reviewed
-        debug_log(f"Getting relevant guidelines for {normalized_path}...")
-        relevant_guidelines = guidelines_store.get_relevant_guidelines(
-            code_snippet=chunk.content,
-            file_path=normalized_path
-        )
-        
-        guidelines_text = "\n".join(relevant_guidelines)
-        debug_log(f"Found {len(relevant_guidelines)} relevant guidelines")
+        # Get relevant guidelines if available
+        guidelines_text = ""
+        if guidelines_store is not None:
+            debug_log(f"Getting relevant guidelines for {normalized_path}...")
+            relevant_guidelines = guidelines_store.get_relevant_guidelines(
+                code_snippet=chunk.content,
+                file_path=normalized_path
+            )
+            
+            guidelines_text = "\n".join(relevant_guidelines)
+            debug_log(f"Found {len(relevant_guidelines)} relevant guidelines")
+        else:
+            debug_log("No guidelines available, skipping guidelines context")
         
         # Map the changes to a format that includes line numbers for easier review
         formatted_changes = []
@@ -387,6 +385,7 @@ def create_prompt(file: File, chunk: Chunk, pr_details: PRDetails) -> str:
         formatted_chunk = "\n".join(formatted_changes)
         debug_log(f"Formatted diff with {len(chunk.changes)} changes")
         
+        # Build the prompt
         prompt = f"""Your task is reviewing pull requests according to our coding guidelines. Instructions:
         - Provide the response in following JSON format: {{"reviews": [{{"lineNumber": <line_number>, "reviewComment": "<review comment>"}}]}}
         - The lineNumber should reference the line numbers shown at the beginning of each line in the diff
@@ -395,12 +394,15 @@ def create_prompt(file: File, chunk: Chunk, pr_details: PRDetails) -> str:
         - Use GitHub Markdown in comments
         - Focus on bugs, security issues, performance problems, and adherence to our coding guidelines
         - IMPORTANT: NEVER suggest adding comments to the code
+"""
 
-Here are the relevant coding guidelines for this code:
+        # Add guidelines context if available
+        if guidelines_text:
+            prompt += f"\nHere are the relevant coding guidelines for this code:\n\n{guidelines_text}\n\n"
+        else:
+            prompt += "\nNo specific coding guidelines are available. Focus on general code quality, potential bugs, and security issues.\n\n"
 
-{guidelines_text}
-
-Review the following code diff in the file "{normalized_path}" and take the pull request title and description into account when writing the response.
+        prompt += f"""Review the following code diff in the file "{normalized_path}" and take the pull request title and description into account when writing the response.
 
 Pull request title: {pr_details.title}
 Pull request description:
@@ -785,6 +787,47 @@ def main():
         debug_log(f"Python version: {sys.version}")
         debug_log(f"Current directory: {os.getcwd()}")
         debug_log(f"Environment variables: {[k for k in os.environ.keys() if not k.startswith('_')]}")
+        
+        # First, check and update guidelines if needed
+        guidelines_manager = GuidelinesManager()
+        guidelines_exist = guidelines_manager.guidelines_exist()
+
+        # If guidelines don't exist, try to fetch from Confluence
+        if not guidelines_exist:
+            debug_log("No guidelines file found, attempting to fetch from Confluence...")
+            guidelines_updated = guidelines_manager.update_guidelines()
+            if guidelines_updated:
+                debug_log("Successfully fetched guidelines from Confluence")
+                guidelines_exist = True
+            else:
+                debug_log("Failed to fetch guidelines from Confluence")
+        else:
+            # Guidelines exist, check if they need updating based on timestamp
+            if guidelines_manager.needs_refresh():
+                debug_log(f"Guidelines are older than {guidelines_manager.refresh_interval_days} days, attempting to update...")
+                guidelines_updated = guidelines_manager.update_guidelines()
+                if guidelines_updated:
+                    debug_log("Successfully refreshed guidelines from Confluence")
+                else:
+                    debug_log("Failed to refresh guidelines, will use existing file")
+        
+        # Initialize guidelines store - only if guidelines exist
+        has_guidelines = guidelines_manager.guidelines_exist()
+        if has_guidelines:
+            try:
+                debug_log("Initializing guidelines store...")
+                global guidelines_store
+                guidelines_store = GuidelinesStore()
+                guidelines_store.initialize_from_markdown('coding_guidelines.md')
+                debug_log("Guidelines store initialized successfully")
+            except Exception as e:
+                debug_log(f"Failed to initialize guidelines store: {str(e)}")
+                debug_log("Continuing without guidelines context")
+                has_guidelines = False
+        else:
+            debug_log("No guidelines file exists. Continuing without guidelines context")
+            # Ensure guidelines_store is None
+            guidelines_store = None
         
         pr_details = get_pr_details()
         debug_log(f"Got PR details: {pr_details.__dict__}")
